@@ -22,14 +22,10 @@
 // This is how the fastest browsers do it as per 2012: http://nullsleep.tumblr.com/post/16524517190/animated-gif-minimum-frame-delay-browser-compatibility
 const NSTimeInterval kFLAnimatedImageDelayTimeIntervalMinimum = 0.02;
 
-// An animated image's data size (dimensions * frameCount) category; its value is the max allowed memory (in MB).
-// E.g.: A 100x200px GIF with 30 frames is ~2.3MB in our pixel format and would fall into the `FLAnimatedImageDataSizeCategoryAll` category.
-typedef NS_ENUM(NSUInteger, FLAnimatedImageDataSizeCategory) {
-    FLAnimatedImageDataSizeCategoryAll = 10,       // All frames permanently in memory (be nice to the CPU)
-    FLAnimatedImageDataSizeCategoryDefault = 75,   // A frame cache of default size in memory (usually real-time performance and keeping low memory profile)
-    FLAnimatedImageDataSizeCategoryOnDemand = 250, // Only keep one frame at the time in memory (easier on memory, slowest performance)
-    FLAnimatedImageDataSizeCategoryUnsupported     // Even for one frame too large, computer says no.
-};
+// An individual animated image's ideal memory footprint, used when calculating the number of frames to preload
+// Note this is per-instance and not across all FLAnimatedImages, it would probably be best if the 10MB memory footprint was shared across all instances
+// (Meaning if you had 100 FLAnimatedImages the sum of their memory footprints / preloaded frames should not exceed 10MB)
+static const CGFloat kFLAnimatedImageIdealMemoryFootprint = 10.0;
 
 typedef NS_ENUM(NSUInteger, FLAnimatedImageFrameCacheSize) {
     FLAnimatedImageFrameCacheSizeNoLimit = 0,                // 0 means no specific limit
@@ -315,27 +311,16 @@ static NSHashTable *allAnimatedImagesWeak;
         } else {
             // We have multiple frames, rock on!
         }
+      
+        // Calculate the optimal frame cache size by fitting the most number of frames possible into the quota specified by kFLAnimatedImageIdealMemoryFootprint
+        CGFloat animatedImageFrameSize = CGImageGetBytesPerRow(self.posterImage.CGImage) * self.size.height / MEGABYTE;
+        _frameCacheSizeOptimal = floor(kFLAnimatedImageIdealMemoryFootprint / animatedImageFrameSize);
         
-        // If no value is provided, select a default based on the GIF.
-        if (optimalFrameCacheSize == 0) {
-            // Calculate the optimal frame cache size: try choosing a larger buffer window depending on the predicted image size.
-            // It's only dependent on the image size & number of frames and never changes.
-            CGFloat animatedImageDataSize = CGImageGetBytesPerRow(self.posterImage.CGImage) * self.size.height * (self.frameCount - skippedFrameCount) / MEGABYTE;
-            if (animatedImageDataSize <= FLAnimatedImageDataSizeCategoryAll) {
-                _frameCacheSizeOptimal = self.frameCount;
-            } else if (animatedImageDataSize <= FLAnimatedImageDataSizeCategoryDefault) {
-                // This value doesn't depend on device memory much because if we're not keeping all frames in memory we will always be decoding 1 frame up ahead per 1 frame that gets played and at this point we might as well just keep a small buffer just large enough to keep from running out of frames.
-                _frameCacheSizeOptimal = FLAnimatedImageFrameCacheSizeDefault;
-            } else {
-                // The predicted size exceeds the limits to build up a cache and we go into low memory mode from the beginning.
-                _frameCacheSizeOptimal = FLAnimatedImageFrameCacheSizeLowMemory;
-            }
-        } else {
-            // Use the provided value.
-            _frameCacheSizeOptimal = optimalFrameCacheSize;
-        }
-        // In any case, cap the optimal cache size at the frame count.
-        _frameCacheSizeOptimal = MIN(_frameCacheSizeOptimal, self.frameCount);
+        // Cap the optimal cache size. "5 frames ought to be enough for anybody" http://bit.ly/1M1gCvs.
+        _frameCacheSizeOptimal = MIN(_frameCacheSizeOptimal, FLAnimatedImageFrameCacheSizeDefault);
+        
+        // There also must be at least one.
+        _frameCacheSizeOptimal = MAX(_frameCacheSizeOptimal, 1);
         
         // Convenience/minor performance optimization; keep an index set handy with the full range to return in `-frameIndexesToCache`.
         _allFramesIndexSet = [[NSIndexSet alloc] initWithIndexesInRange:NSMakeRange(0, self.frameCount)];
